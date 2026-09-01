@@ -439,7 +439,8 @@ int sd_dhcp6_client_set_request_user_class(sd_dhcp6_client *client, char * const
         return strv_free_and_replace(client->user_class, s);
 }
 
-int sd_dhcp6_client_set_request_vendor_class(sd_dhcp6_client *client, char * const *vendor_class) {
+int sd_dhcp6_client_set_request_vendor_class(sd_dhcp6_client *client, char * const *vendor_class,
+                                             uint32_t enterprise_identifier) {
         char **s;
 
         assert_return(client, -EINVAL);
@@ -457,7 +458,8 @@ int sd_dhcp6_client_set_request_vendor_class(sd_dhcp6_client *client, char * con
         if (!s)
                 return -ENOMEM;
 
-        return strv_free_and_replace(client->vendor_class, s);
+        return ordered_hashmap_ensure_replace(&client->vendor_class, NULL,
+                                              UINT32_TO_PTR(enterprise_identifier), s);
 }
 
 int sd_dhcp6_client_get_prefix_delegation(sd_dhcp6_client *client, int *delegation) {
@@ -612,6 +614,8 @@ static int client_append_common_options_in_managed_mode(
                 const DHCP6IA *ia_na,
                 const DHCP6IA *ia_pd) {
 
+        char * const *vendor_class_data;
+        uint32_t enterprise_identifier;
         int r;
 
         assert(client);
@@ -647,9 +651,11 @@ static int client_append_common_options_in_managed_mode(
         if (r < 0)
                 return r;
 
-        r = dhcp6_option_append_vendor_class(buf, offset, client->vendor_class);
-        if (r < 0)
-                return r;
+        ORDERED_HASHMAP_FOREACH_KEY(vendor_class_data, enterprise_identifier, client->vendor_class) {
+                r = dhcp6_option_append_vendor_class(buf, offset, vendor_class_data, enterprise_identifier);
+                if (r < 0)
+                        return r;
+        }
 
         r = dhcp6_option_append_vendor_option(buf, offset, client->vendor_options);
         if (r < 0)
@@ -1560,7 +1566,7 @@ static sd_dhcp6_client *dhcp6_client_free(sd_dhcp6_client *client) {
         ordered_hashmap_free(client->extra_options);
         ordered_set_free(client->vendor_options);
         strv_free(client->user_class);
-        strv_free(client->vendor_class);
+        ordered_hashmap_free(client->vendor_class);
         free(client->ifname);
 
         return mfree(client);
