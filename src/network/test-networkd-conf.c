@@ -238,6 +238,91 @@ TEST(config_parse_address) {
         test_config_parse_address_one("::1/-1", AF_INET6, 0, NULL, 0);
 }
 
+TEST(config_parse_dhcp6_vendor_class) {
+        _cleanup_(ordered_hashmap_freep) OrderedHashmap *vc = NULL;
+        char **found;
+
+        /* Plain whitespace-separated list, no PEN prefix: stored under SYSTEMD_PEN. */
+        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "hello world", &vc, NULL) == 0);
+        assert_se(ordered_hashmap_size(vc) == 1);
+        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
+        assert_se(strv_equal(found, STRV_MAKE("hello", "world")));
+        vc = ordered_hashmap_free(vc);
+
+        /* Explicit "PEN:value" prefix. */
+        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "12345:foo bar", &vc, NULL) == 0);
+        assert_se(ordered_hashmap_size(vc) == 1);
+        found = ordered_hashmap_get(vc, UINT32_TO_PTR(12345));
+        assert_se(strv_equal(found, STRV_MAKE("foo", "bar")));
+        vc = ordered_hashmap_free(vc);
+
+        /* A non-numeric word before the colon is not a PEN prefix: falls back to plain parsing, with the
+         * colon preserved as a literal part of the entry. */
+        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "foo:bar baz", &vc, NULL) == 0);
+        assert_se(ordered_hashmap_size(vc) == 1);
+        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
+        assert_se(strv_equal(found, STRV_MAKE("foo:bar", "baz")));
+        vc = ordered_hashmap_free(vc);
+
+        /* A colon in a *later* word (not the first) is never treated as a PEN prefix, even if it looks
+         * like "<digits>:...", so a legitimate entry containing a colon is preserved verbatim. */
+        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "foo:bar 12345:baz", &vc, NULL) == 0);
+        assert_se(ordered_hashmap_size(vc) == 1);
+        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
+        assert_se(strv_equal(found, STRV_MAKE("foo:bar", "12345:baz")));
+        vc = ordered_hashmap_free(vc);
+
+        /* A trailing colon with nothing at all after it ("123:") is not mistaken for a PEN prefix with
+         * an empty payload: the whole value is instead parsed as the literal single entry "123:" under
+         * SYSTEMD_PEN, and no PEN 123 entry is created. */
+        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123:", &vc, NULL) == 0);
+        assert_se(ordered_hashmap_size(vc) == 1);
+        assert_se(!ordered_hashmap_get(vc, UINT32_TO_PTR(123)));
+        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
+        assert_se(strv_equal(found, STRV_MAKE("123:")));
+        vc = ordered_hashmap_free(vc);
+
+        /* Specifying the same (explicit) PEN more than once merges (appends to) the existing list,
+         * matching the behavior of other list-like settings (e.g. UserClass=) when specified multiple
+         * times, rather than replacing or rejecting the later assignment. Duplicate string values are
+         * not filtered out, matching the original (pre-per-PEN) behavior. */
+        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123:foo", &vc, NULL) == 0);
+        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123:bar", &vc, NULL) == 0);
+        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123:foo", &vc, NULL) == 0);
+        found = ordered_hashmap_get(vc, UINT32_TO_PTR(123));
+        assert_se(strv_equal(found, STRV_MAKE("foo", "bar", "foo")));
+
+        /* Merging also applies to the default (implicit) PEN across multiple plain assignments. */
+        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "hello", &vc, NULL) == 0);
+        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "world", &vc, NULL) == 0);
+        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
+        assert_se(strv_equal(found, STRV_MAKE("hello", "world")));
+
+        /* A different PEN remains a separate entry, unaffected by the above. */
+        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "456:baz", &vc, NULL) == 0);
+        assert_se(ordered_hashmap_size(vc) == 3);
+        found = ordered_hashmap_get(vc, UINT32_TO_PTR(456));
+        assert_se(strv_equal(found, STRV_MAKE("baz")));
+
+        /* An empty assignment clears everything, regardless of what PEN-specific entries exist. */
+        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "", &vc, NULL) == 0);
+        assert_se(ordered_hashmap_isempty(vc));
+
+        /* An entry exceeding the maximum length is skipped (with a warning), but other, valid entries on
+         * the same line are still processed. */
+        {
+                _cleanup_free_ char *too_long = NULL, *rvalue = NULL;
+
+                assert_se(too_long = new0(char, UINT16_MAX + 2));
+                memset(too_long, 'x', UINT16_MAX + 1);
+                assert_se(rvalue = strjoin("foo ", too_long, " bar"));
+
+                assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, rvalue, &vc, NULL) == 0);
+                found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
+                assert_se(strv_equal(found, STRV_MAKE("foo", "bar")));
+        }
+}
+
 TEST(config_parse_match_ifnames) {
         _cleanup_strv_free_ char **names = NULL;
 
