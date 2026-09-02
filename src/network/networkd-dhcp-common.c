@@ -697,7 +697,7 @@ int config_parse_dhcp4_user_class(
         }
 }
 
-int config_parse_dhcp6_user_or_vendor_class(
+int config_parse_dhcp6_user_class(
                 const char *unit,
                 const char *filename,
                 unsigned line,
@@ -740,6 +740,101 @@ int config_parse_dhcp6_user_or_vendor_class(
                 if (r < 0)
                         return log_oom();
         }
+}
+
+int config_parse_dhcp6_vendor_class(
+                const char *unit,
+                const char *filename,
+                unsigned line,
+                const char *section,
+                unsigned section_line,
+                const char *lvalue,
+                int ltype,
+                const char *rvalue,
+                void *data,
+                void *userdata) {
+
+        OrderedHashmap **vendor_class = ASSERT_PTR(data);
+        uint32_t enterprise_identifier = SYSTEMD_PEN;
+        _cleanup_strv_free_ char **l = NULL;
+        const char *p = rvalue;
+        int r;
+
+        assert(lvalue);
+        assert(rvalue);
+
+        if (isempty(rvalue)) {
+                *vendor_class = ordered_hashmap_free(*vendor_class);
+                return 0;
+        }
+
+        /* The value may be optionally prefixed with the enterprise identifier (PEN) the vendor class
+         * data should be sent under, separated by a colon, e.g. "12345:foo bar baz". The colon is only
+         * recognized as such if it appears within the first whitespace-delimited word and is followed by
+         * at least one more character, so that a) a legitimate vendor class entry containing a colon
+         * further in is not misinterpreted, e.g. "foo:bar 12345:baz" is still parsed as the two plain
+         * vendor class entries "foo:bar" and "12345:baz", and b) a value with nothing at all following
+         * the colon, e.g. "123:", is not mistaken for a PEN prefix with an (invalid, empty) payload, and
+         * instead produces the literal single entry "123:" under SYSTEMD_PEN. If no such prefix is
+         * present, or the leading word is not a valid number, SYSTEMD_PEN is used, and the whole string
+         * is parsed as the whitespace-separated list of vendor class entries. */
+        const char *colon = memchr(rvalue, ':', strcspn(rvalue, WHITESPACE));
+        if (colon && colon[1] != '\0') {
+                _cleanup_free_ char *pen = strndup(rvalue, colon - rvalue);
+                if (!pen)
+                        return log_oom();
+
+                if (safe_atou32(pen, &enterprise_identifier) >= 0)
+                        p = colon + 1;
+        }
+
+        for (;;) {
+                _cleanup_free_ char *w = NULL;
+
+                r = extract_first_word(&p, &w, NULL, EXTRACT_CUNESCAPE|EXTRACT_UNQUOTE);
+                if (r < 0)
+                        return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
+                if (r == 0)
+                        break;
+
+                size_t len = strlen(w);
+                if (len > UINT16_MAX || len == 0) {
+                        log_syntax(unit, LOG_WARNING, filename, line, 0,
+                                   "The length of the %s entry '%s' is not in the range 1…65535, ignoring.", lvalue, w);
+                        continue;
+                }
+
+                r = strv_consume(&l, TAKE_PTR(w));
+                if (r < 0)
+                        return log_oom();
+        }
+
+        if (strv_isempty(l))
+                return 0;
+
+        /* If an entry for this enterprise identifier already exists, merge the newly parsed entries into
+         * it, so that specifying VendorClass= multiple times with the same (explicit or default)
+         * enterprise identifier appends to the list, matching the behavior of other list-like settings
+         * (e.g. UserClass=) when specified multiple times. */
+        char **old = ordered_hashmap_get(*vendor_class, UINT32_TO_PTR(enterprise_identifier));
+        if (old) {
+                r = strv_extend_strv(&old, l, /* filter_duplicates = */ false);
+                if (r < 0)
+                        return log_oom();
+
+                /* strv_extend_strv() may have reallocated "old", so it needs to be re-stored in the
+                 * hashmap. This can only fail for a *new* key, so as "old" is already a value for an
+                 * existing key here, it is not expected to fail. */
+                assert_se(ordered_hashmap_update(*vendor_class, UINT32_TO_PTR(enterprise_identifier), old) >= 0);
+                return 0;
+        }
+
+        r = ordered_hashmap_ensure_put(vendor_class, &dhcp6_vendor_class_hash_ops, UINT32_TO_PTR(enterprise_identifier), l);
+        if (r < 0)
+                return log_oom();
+
+        TAKE_PTR(l);
+        return 0;
 }
 
 int config_parse_dhcp6_send_option(

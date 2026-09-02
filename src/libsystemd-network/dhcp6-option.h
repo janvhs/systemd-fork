@@ -20,6 +20,11 @@ typedef struct sd_dhcp6_option {
 
 extern const struct hash_ops dhcp6_option_hash_ops;
 
+/* OrderedHashmap mapping an enterprise identifier (as key, via UINT32_TO_PTR()/PTR_TO_UINT32()) to the
+ * vendor class strv (char**) to be sent for that enterprise identifier. Shared between sd-dhcp6-client.c
+ * and networkd-dhcp-common.c, which both already include this header. */
+extern const struct hash_ops dhcp6_vendor_class_hash_ops;
+
 /* Common option header */
 typedef struct DHCP6Option {
         be16_t code;
