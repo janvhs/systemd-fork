@@ -238,176 +238,82 @@ TEST(config_parse_address) {
         test_config_parse_address_one("::1/-1", AF_INET6, 0, NULL, 0);
 }
 
+static void test_config_parse_dhcp6_vendor_class_parse_helper(const char *rvalue, OrderedHashmap **vendor_class) {
+        ASSERT_OK(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, rvalue, vendor_class, NULL));
+}
+
+static void test_config_parse_dhcp6_vendor_class_helper(const char *rvalue, uint32_t enterprise_identifier, char * const *expected_data) {
+        _cleanup_(ordered_hashmap_freep) OrderedHashmap *vendor_class = NULL;
+
+        test_config_parse_dhcp6_vendor_class_parse_helper(rvalue, &vendor_class);
+
+        if (expected_data) {
+                ASSERT_EQ(ordered_hashmap_size(vendor_class), 1u);
+                ASSERT_TRUE(strv_equal(ordered_hashmap_get(vendor_class, UINT32_TO_PTR(enterprise_identifier)),
+                                       expected_data));
+        } else
+                ASSERT_TRUE(ordered_hashmap_isempty(vendor_class));
+}
+
 TEST(config_parse_dhcp6_vendor_class) {
-        _cleanup_(ordered_hashmap_freep) OrderedHashmap *vc = NULL;
-        char **found;
+        _cleanup_(ordered_hashmap_freep) OrderedHashmap *vendor_class = NULL;
 
-        /* Plain whitespace-separated list, no PEN prefix: stored under SYSTEMD_PEN. */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "hello world", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-        assert_se(strv_equal(found, STRV_MAKE("hello", "world")));
-        vc = ordered_hashmap_free(vc);
+        /* No PEN prefix, mirrors old behavior */
+        test_config_parse_dhcp6_vendor_class_helper("foo bar", SYSTEMD_PEN, STRV_MAKE("foo", "bar"));
+        test_config_parse_dhcp6_vendor_class_helper("foo 32473:bar", SYSTEMD_PEN, STRV_MAKE("foo", "32473:bar"));
 
-        /* Explicit "PEN:value" prefix. */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "12345:foo bar", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(12345));
-        assert_se(strv_equal(found, STRV_MAKE("foo", "bar")));
-        vc = ordered_hashmap_free(vc);
+        /* Opt-out via explicit systemd enterprise identifier */
+        test_config_parse_dhcp6_vendor_class_helper("43793:foo", SYSTEMD_PEN, STRV_MAKE("foo"));
 
-        /* A non-numeric word before the colon is not a PEN prefix: falls back to plain parsing, with the
-         * colon preserved as a literal part of the entry. */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "foo:bar baz", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-        assert_se(strv_equal(found, STRV_MAKE("foo:bar", "baz")));
-        vc = ordered_hashmap_free(vc);
+        /* Optional PEN prefix, uses PEN */
+        test_config_parse_dhcp6_vendor_class_helper("32473:foo bar", 32473, STRV_MAKE("foo", "bar"));
+        test_config_parse_dhcp6_vendor_class_helper("32473:\"foo bar\"", 32473, STRV_MAKE("foo bar"));
+        test_config_parse_dhcp6_vendor_class_helper("32473::", 32473, STRV_MAKE(":"));
+        test_config_parse_dhcp6_vendor_class_helper("+32473:foo", 32473, STRV_MAKE("foo"));
 
-        /* A colon in a *later* word (not the first) is never treated as a PEN prefix, even if it looks
-         * like "<digits>:...", so a legitimate entry containing a colon is preserved verbatim. */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "foo:bar 12345:baz", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-        assert_se(strv_equal(found, STRV_MAKE("foo:bar", "12345:baz")));
-        vc = ordered_hashmap_free(vc);
+        /* Backwards compatibility */
+        test_config_parse_dhcp6_vendor_class_helper(":", SYSTEMD_PEN, STRV_MAKE(":"));
+        test_config_parse_dhcp6_vendor_class_helper(":foo", SYSTEMD_PEN, STRV_MAKE(":foo"));
+        test_config_parse_dhcp6_vendor_class_helper("32473", SYSTEMD_PEN, STRV_MAKE("32473"));
+        test_config_parse_dhcp6_vendor_class_helper("32473:", SYSTEMD_PEN, STRV_MAKE("32473:"));
+        test_config_parse_dhcp6_vendor_class_helper("foobar 32473:baz", SYSTEMD_PEN, STRV_MAKE("foobar", "32473:baz"));
 
-        /* A trailing colon with nothing at all after it ("123:") is not mistaken for a PEN prefix with
-         * an empty payload: the whole value is instead parsed as the literal single entry "123:" under
-         * SYSTEMD_PEN, and no PEN 123 entry is created. */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123:", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        assert_se(!ordered_hashmap_get(vc, UINT32_TO_PTR(123)));
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-        assert_se(strv_equal(found, STRV_MAKE("123:")));
-        vc = ordered_hashmap_free(vc);
+        /* Invalid PEN */
+        test_config_parse_dhcp6_vendor_class_helper("foo:bar baz", SYSTEMD_PEN, STRV_MAKE("foo:bar", "baz"));
+        test_config_parse_dhcp6_vendor_class_helper("-32473:foo", SYSTEMD_PEN, STRV_MAKE("-32473:foo"));
+        test_config_parse_dhcp6_vendor_class_helper("4294967296:foo", SYSTEMD_PEN, STRV_MAKE("4294967296:foo"));
+        test_config_parse_dhcp6_vendor_class_helper("0:foo", SYSTEMD_PEN, STRV_MAKE("0:foo"));
+        test_config_parse_dhcp6_vendor_class_helper("4294967295:foo", SYSTEMD_PEN, STRV_MAKE("4294967295:foo"));
 
-        /* Full coverage of the PEN-prefix parsing matrix documented in config_parse_dhcp6_vendor_class()
-         * itself: a bare number with no colon at all, or a number followed by a colon with nothing (not
-         * even another colon) after it, never establishes a PEN prefix -- the whole string, colon
-         * included, is parsed as-is under the default (SYSTEMD_PEN) entry. Conversely, a numeric prefix
-         * followed by a colon and *anything* at all afterwards (even just another colon) always
-         * establishes an explicit PEN, with everything after the first colon parsed as the data. */
+        /* Invalid input */
+        test_config_parse_dhcp6_vendor_class_helper("32473:\\", 32473, NULL);
+        test_config_parse_dhcp6_vendor_class_helper("32473:\"\"", 32473, NULL);
 
-        /* 123 -> PEN=SYSTEMD_PEN DATA=123 */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-        assert_se(strv_equal(found, STRV_MAKE("123")));
-        vc = ordered_hashmap_free(vc);
+        /* Entries with the same PEN merge and entries append */
+        test_config_parse_dhcp6_vendor_class_parse_helper("32473:foo", &vendor_class);
+        test_config_parse_dhcp6_vendor_class_parse_helper("32473:bar", &vendor_class);
+        test_config_parse_dhcp6_vendor_class_parse_helper("32473:foo", &vendor_class);
+        ASSERT_TRUE(strv_equal(ordered_hashmap_get(vendor_class, UINT32_TO_PTR(32473)), STRV_MAKE("foo", "bar", "foo")));
+        ASSERT_EQ(ordered_hashmap_size(vendor_class), 1u);
 
-        /* 123:: -> PEN=123 DATA=: */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123::", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(123));
-        assert_se(strv_equal(found, STRV_MAKE(":")));
-        vc = ordered_hashmap_free(vc);
+        test_config_parse_dhcp6_vendor_class_parse_helper("foo", &vendor_class);
+        test_config_parse_dhcp6_vendor_class_parse_helper("bar", &vendor_class);
+        ASSERT_TRUE(strv_equal(ordered_hashmap_get(vendor_class, UINT32_TO_PTR(SYSTEMD_PEN)), STRV_MAKE("foo", "bar")));
+        ASSERT_EQ(ordered_hashmap_size(vendor_class), 2u);
 
-        /* 123:foo -> PEN=123 DATA=foo */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123:foo", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(123));
-        assert_se(strv_equal(found, STRV_MAKE("foo")));
-        vc = ordered_hashmap_free(vc);
+        /* Empty string clears all values */
+        test_config_parse_dhcp6_vendor_class_parse_helper("", &vendor_class);
+        ASSERT_TRUE(ordered_hashmap_isempty(vendor_class));
 
-        /* : -> PEN=SYSTEMD_PEN DATA=: */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, ":", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-        assert_se(strv_equal(found, STRV_MAKE(":")));
-        vc = ordered_hashmap_free(vc);
-
-        /* :foo -> PEN=SYSTEMD_PEN DATA=:foo */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, ":foo", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-        assert_se(strv_equal(found, STRV_MAKE(":foo")));
-        vc = ordered_hashmap_free(vc);
-
-        /* :foo: -> PEN=SYSTEMD_PEN DATA=:foo: */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, ":foo:", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-        assert_se(strv_equal(found, STRV_MAKE(":foo:")));
-        vc = ordered_hashmap_free(vc);
-
-        /* foo:bar -> PEN=SYSTEMD_PEN DATA=foo:bar */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "foo:bar", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-        assert_se(strv_equal(found, STRV_MAKE("foo:bar")));
-        vc = ordered_hashmap_free(vc);
-
-        /* 123:foo: -> PEN=123 DATA=foo: */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123:foo:", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(123));
-        assert_se(strv_equal(found, STRV_MAKE("foo:")));
-        vc = ordered_hashmap_free(vc);
-
-        /* 123:foo:456 -> PEN=123 DATA=foo:456 */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123:foo:456", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(123));
-        assert_se(strv_equal(found, STRV_MAKE("foo:456")));
-        vc = ordered_hashmap_free(vc);
-
-        /* An enterprise identifier of 0 is outside the valid range (RFC 9371 reserves 0 and
-         * 4294967295), so it is rejected and treated the same as a non-numeric prefix: the whole string
-         * is parsed as the literal entry under SYSTEMD_PEN. */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "0:foo", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        assert_se(!ordered_hashmap_get(vc, UINT32_TO_PTR(0)));
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-        assert_se(strv_equal(found, STRV_MAKE("0:foo")));
-        vc = ordered_hashmap_free(vc);
-
-        /* Likewise, 4294967295 (UINT32_MAX) is reserved and rejected. */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "4294967295:foo", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 1);
-        assert_se(!ordered_hashmap_get(vc, UINT32_TO_PTR(UINT32_MAX)));
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-        assert_se(strv_equal(found, STRV_MAKE("4294967295:foo")));
-        vc = ordered_hashmap_free(vc);
-
-        /* Specifying the same (explicit) PEN more than once merges (appends to) the existing list,
-         * matching the behavior of other list-like settings (e.g. UserClass=) when specified multiple
-         * times, rather than replacing or rejecting the later assignment. Duplicate string values are
-         * not filtered out, matching the original (pre-per-PEN) behavior. */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123:foo", &vc, NULL) == 0);
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123:bar", &vc, NULL) == 0);
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "123:foo", &vc, NULL) == 0);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(123));
-        assert_se(strv_equal(found, STRV_MAKE("foo", "bar", "foo")));
-
-        /* Merging also applies to the default (implicit) PEN across multiple plain assignments. */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "hello", &vc, NULL) == 0);
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "world", &vc, NULL) == 0);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-        assert_se(strv_equal(found, STRV_MAKE("hello", "world")));
-
-        /* A different PEN remains a separate entry, unaffected by the above. */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "456:baz", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_size(vc) == 3);
-        found = ordered_hashmap_get(vc, UINT32_TO_PTR(456));
-        assert_se(strv_equal(found, STRV_MAKE("baz")));
-
-        /* An empty assignment clears everything, regardless of what PEN-specific entries exist. */
-        assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, "", &vc, NULL) == 0);
-        assert_se(ordered_hashmap_isempty(vc));
-
-        /* An entry exceeding the maximum length is skipped (with a warning), but other, valid entries on
-         * the same line are still processed. */
+        /* Too too short and too long options are skipped */
+        test_config_parse_dhcp6_vendor_class_helper("32473:foo \"\"", 32473, STRV_MAKE("foo"));
         {
-                _cleanup_free_ char *too_long = NULL, *rvalue = NULL;
+                _cleanup_free_ char *invaid_entry = NULL, *rvalue = NULL;
 
-                assert_se(too_long = new0(char, UINT16_MAX + 2));
-                memset(too_long, 'x', UINT16_MAX + 1);
-                assert_se(rvalue = strjoin("foo ", too_long, " bar"));
+                ASSERT_NOT_NULL(invaid_entry = strrep("x", UINT16_MAX + 1));
+                ASSERT_NOT_NULL(rvalue = strjoin("foo ", invaid_entry, " bar"));
 
-                assert_se(config_parse_dhcp6_vendor_class("network", "filename", 1, "section", 1, "VendorClass", 0, rvalue, &vc, NULL) == 0);
-                found = ordered_hashmap_get(vc, UINT32_TO_PTR(SYSTEMD_PEN));
-                assert_se(strv_equal(found, STRV_MAKE("foo", "bar")));
+                test_config_parse_dhcp6_vendor_class_helper(rvalue, SYSTEMD_PEN, STRV_MAKE("foo", "bar"));
         }
 }
 
