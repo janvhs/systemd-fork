@@ -787,8 +787,8 @@ int config_parse_dhcp6_vendor_class(
                 if (r < 0) {
                         /* The prefix is non-numeric or not an uint32  */
                         log_syntax(unit, LOG_NOTICE, filename, line, r,
-                                   "Invalid DHCPv6 enterprise identifier, using default value '%"PRIu32"': %s",
-                                   (uint32_t) SYSTEMD_PEN, rvalue);
+                                   "Invalid DHCPv6 enterprise identifier '%s', using default value '%"PRIu32"': %s",
+                                   maybe_enterprise_identifier, (uint32_t) SYSTEMD_PEN, rvalue);
                         p = rvalue;
                 } else if (enterprise_identifier < 1 || enterprise_identifier >= UINT32_MAX) {
                         /* The enterprise identifier is outside the allowed range (RFC 9371) */
@@ -812,7 +812,8 @@ int config_parse_dhcp6_vendor_class(
                 size_t len = strlen(word);
                 if (len > UINT16_MAX || len == 0) {
                         log_syntax(unit, LOG_WARNING, filename, line, 0,
-                                   "The length of the %s entry '%s' is not in the range 1…65535, ignoring.", lvalue, word);
+                                   "The length of the %s entry '%s' for enterprise identifier %"PRIu32" is not in the range 1…65535, ignoring.",
+                                   lvalue, word, enterprise_identifier);
                         continue;
                 }
 
