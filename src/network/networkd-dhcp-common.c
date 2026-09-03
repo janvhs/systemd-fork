@@ -755,8 +755,9 @@ int config_parse_dhcp6_vendor_class(
                 void *userdata) {
 
         OrderedHashmap **vendor_class = ASSERT_PTR(data);
+        _cleanup_free_ char *maybe_enterprise_identifier = NULL;
+        _cleanup_strv_free_ char **vendor_class_data = NULL;
         uint32_t enterprise_identifier = SYSTEMD_PEN;
-        _cleanup_strv_free_ char **l = NULL;
         const char *p = rvalue;
         int r;
 
@@ -768,72 +769,79 @@ int config_parse_dhcp6_vendor_class(
                 return 0;
         }
 
-        /* The value may be optionally prefixed with the enterprise identifier (PEN) the vendor class
-         * data should be sent under, separated by a colon, e.g. "12345:foo bar baz". The colon is only
-         * recognized as such if it appears within the first whitespace-delimited word and is followed by
-         * at least one more character, so that a) a legitimate vendor class entry containing a colon
-         * further in is not misinterpreted, e.g. "foo:bar 12345:baz" is still parsed as the two plain
-         * vendor class entries "foo:bar" and "12345:baz", and b) a value with nothing at all following
-         * the colon, e.g. "123:", is not mistaken for a PEN prefix with an (invalid, empty) payload, and
-         * instead produces the literal single entry "123:" under SYSTEMD_PEN. If no such prefix is
-         * present, or the leading word is not a valid number, SYSTEMD_PEN is used, and the whole string
-         * is parsed as the whitespace-separated list of vendor class entries. */
-        const char *colon = memchr(rvalue, ':', strcspn(rvalue, WHITESPACE));
-        if (colon && colon[1] != '\0') {
-                _cleanup_free_ char *pen = strndup(rvalue, colon - rvalue);
-                if (!pen)
-                        return log_oom();
-
-                if (safe_atou32(pen, &enterprise_identifier) >= 0)
-                        p = colon + 1;
+        /* Extract the optional PEN prefix. */
+        r = extract_first_word(&p, &maybe_enterprise_identifier, ":", EXTRACT_DONT_COALESCE_SEPARATORS);
+        if (r == -ENOMEM)
+                return log_oom();
+        if (r < 0) {
+                log_syntax(unit, LOG_WARNING, filename, line, r,
+                                "Failed to parse %s=%s, ignoring assignment: %m", lvalue, rvalue);
+                return 0;
+        }
+        /* The rvalue starts with ':', doesn't contain a ':' or the whole string contains one ':' at the end. */
+        if (isempty(maybe_enterprise_identifier) || isempty(p))
+                p = rvalue;
+        else {
+                /* The rvalue could start with PEN and contain more data. */
+                r = safe_atou32(maybe_enterprise_identifier, &enterprise_identifier);
+                if (r < 0) {
+                        /* The prefix is non-numeric or not an uint32  */
+                        log_syntax(unit, LOG_NOTICE, filename, line, r,
+                                   "Invalid DHCPv6 enterprise identifier, using default value '%"PRIu32"': %s",
+                                   (uint32_t) SYSTEMD_PEN, rvalue);
+                        p = rvalue;
+                } else if (enterprise_identifier < 1 || enterprise_identifier >= UINT32_MAX) {
+                        /* The enterprise identifier is outside the allowed range (RFC 9371) */
+                        log_syntax(unit, LOG_WARNING, filename, line, 0,
+                                   "Invalid DHCPv6 enterprise identifier, valid range is 1-%"PRIu32", using default value '%"PRIu32"': %s",
+                                   UINT32_MAX - 1, (uint32_t) SYSTEMD_PEN, rvalue);
+                        enterprise_identifier = SYSTEMD_PEN;
+                        p = rvalue;
+                }
         }
 
         for (;;) {
-                _cleanup_free_ char *w = NULL;
+                _cleanup_free_ char *word = NULL;
 
-                r = extract_first_word(&p, &w, NULL, EXTRACT_CUNESCAPE|EXTRACT_UNQUOTE);
+                r = extract_first_word(&p, &word, NULL, EXTRACT_CUNESCAPE|EXTRACT_UNQUOTE);
                 if (r < 0)
                         return log_syntax_parse_error(unit, filename, line, r, lvalue, rvalue);
                 if (r == 0)
                         break;
 
-                size_t len = strlen(w);
+                size_t len = strlen(word);
                 if (len > UINT16_MAX || len == 0) {
                         log_syntax(unit, LOG_WARNING, filename, line, 0,
-                                   "The length of the %s entry '%s' is not in the range 1…65535, ignoring.", lvalue, w);
+                                   "The length of the %s entry '%s' is not in the range 1…65535, ignoring.", lvalue, word);
                         continue;
                 }
 
-                r = strv_consume(&l, TAKE_PTR(w));
+                r = strv_consume(&vendor_class_data, TAKE_PTR(word));
                 if (r < 0)
                         return log_oom();
         }
 
-        if (strv_isempty(l))
+        if (strv_isempty(vendor_class_data))
                 return 0;
 
-        /* If an entry for this enterprise identifier already exists, merge the newly parsed entries into
-         * it, so that specifying VendorClass= multiple times with the same (explicit or default)
-         * enterprise identifier appends to the list, matching the behavior of other list-like settings
-         * (e.g. UserClass=) when specified multiple times. */
-        char **old = ordered_hashmap_get(*vendor_class, UINT32_TO_PTR(enterprise_identifier));
-        if (old) {
-                r = strv_extend_strv(&old, l, /* filter_duplicates = */ false);
+        /* Merge entries with the same enterprise identifier. */
+        char **old_entry = ordered_hashmap_get(*vendor_class, UINT32_TO_PTR(enterprise_identifier));
+        if (old_entry) {
+                r = strv_extend_strv(&old_entry, vendor_class_data, false);
                 if (r < 0)
                         return log_oom();
 
-                /* strv_extend_strv() may have reallocated "old", so it needs to be re-stored in the
-                 * hashmap. This can only fail for a *new* key, so as "old" is already a value for an
-                 * existing key here, it is not expected to fail. */
-                assert_se(ordered_hashmap_update(*vendor_class, UINT32_TO_PTR(enterprise_identifier), old) >= 0);
-                return 0;
+                return ordered_hashmap_update(*vendor_class, UINT32_TO_PTR(enterprise_identifier), old_entry);
         }
 
-        r = ordered_hashmap_ensure_put(vendor_class, &dhcp6_vendor_class_hash_ops, UINT32_TO_PTR(enterprise_identifier), l);
-        if (r < 0)
+        r = ordered_hashmap_ensure_put(vendor_class, &dhcp6_vendor_class_hash_ops,
+                                       UINT32_TO_PTR(enterprise_identifier), vendor_class_data);
+        if (r == -ENOMEM)
                 return log_oom();
+        if (r < 0)
+                return r;
 
-        TAKE_PTR(l);
+        TAKE_PTR(vendor_class_data);
         return 0;
 }
 

@@ -610,7 +610,7 @@ static int dhcp6_set_identifier(Link *link, sd_dhcp6_client *client) {
 static int dhcp6_configure(Link *link) {
         _cleanup_(sd_dhcp6_client_unrefp) sd_dhcp6_client *client = NULL;
         char * const *vendor_class_data;
-        void *vendor_class_key;
+        void *enterprise_identifier_key;
         sd_dhcp6_option *vendor_option;
         sd_dhcp6_option *send_option;
         void *request_options;
@@ -725,12 +725,12 @@ static int dhcp6_configure(Link *link) {
                         return log_link_debug_errno(link, r, "DHCPv6 CLIENT: Failed to set user class: %m");
         }
 
-        ORDERED_HASHMAP_FOREACH_KEY(vendor_class_data, vendor_class_key, link->network->dhcp6_vendor_class) {
-                uint32_t enterprise_identifier = PTR_TO_UINT32(vendor_class_key);
+        ORDERED_HASHMAP_FOREACH_KEY(vendor_class_data, enterprise_identifier_key, link->network->dhcp6_vendor_class) {
+                uint32_t enterprise_identifier = PTR_TO_UINT32(enterprise_identifier_key);
 
                 r = sd_dhcp6_client_set_request_vendor_class(client, vendor_class_data, enterprise_identifier);
                 if (r == -EEXIST) {
-                        log_link_debug(link, "DHCPv6 CLIENT: Vendor class for enterprise identifier '%"PRIu32"' already exists, ignoring.",
+                        log_link_debug(link, "DHCPv6 CLIENT: Failed to set vendor class for enterprise identifier '%"PRIu32"' already exists, ignoring.",
                                        enterprise_identifier);
                         continue;
                 }
