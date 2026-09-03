@@ -3185,9 +3185,10 @@ MultiPathRoute=2001:db8::1@eth0</programlisting>
           is specified, systemd's own IANA-assigned PEN is used as the default value. Special characters in
           the data string may be escaped using
           <ulink url="https://en.wikipedia.org/wiki/Escape_sequences_in_C#Table_of_escape_sequences">C-style
-          escapes</ulink>. This setting can be specified multiple times. If an empty string is specified,
-          then all options specified earlier are cleared. Defaults to unset. Note that currently
-          <constant>NUL</constant> bytes are not allowed.</para>
+          escapes</ulink>. This setting can be specified multiple times. Entries sharing the same enterprise
+          identifier are combined into a single option. If an empty string is specified, then all options
+          specified earlier are cleared. Defaults to unset. Note that currently <constant>NUL</constant>
+          bytes are not allowed.</para>
 
           <xi:include href="version-info.xml" xpointer="v246"/>
         </listitem>
